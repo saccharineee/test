@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+flask.log
+flask_new.log
+完整漏洞审计报告.docx
+*.db

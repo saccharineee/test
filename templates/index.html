@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+{% if username and user %}
+<div class="card welcome-card">
+    <h2>欢迎回来，{{ username }}！</h2>
+    {% if show_pwd_warning %}
+    <div class="warning-msg">
+        ⚠️ 您正在使用默认密码，建议立即 <a href="/change-password">修改密码</a>
+    </div>
+    {% endif %}
+    <h3>用户信息</h3>
+    <ul class="info-list">
+        <li><span class="label">用户名：</span>{{ user['username'] }}</li>
+        <li><span class="label">密码：</span>{{ user['password'] }}</li>
+        <li><span class="label">邮箱：</span>{{ user['email'] }}</li>
+        <li><span class="label">手机：</span>{{ user['phone'] }}</li>
+        <li><span class="label">角色：</span>{{ user['role'] }}</li>
+        <li><span class="label">余额：</span>{{ user['balance'] }}</li>
+    </ul>
+    <div class="action-links">
+        <a href="/change-password" class="btn btn-warning">修改密码</a>
+        <a href="/logout" class="btn btn-danger">退出登录</a>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <h2>请先登录</h2>
+    <p>您尚未登录，请点击下方按钮登录系统。</p>
+    <a href="/login" class="btn btn-primary">前往登录</a>
+</div>
+{% endif %}
+{% endblock %}
