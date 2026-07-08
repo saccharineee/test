@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 flask.log
 flask_new.log
-完整漏洞审计报告.docx
 *.db
+data/
+完整漏洞审计报告.docx
+gen_sql_report.py
