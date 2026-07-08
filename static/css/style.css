@@ -137,7 +137,6 @@ body {
 .btn-danger {
     background: #e74c3c;
     color: #fff;
-    margin-top: 10px;
 }
 
 .error-msg {
@@ -219,5 +218,18 @@ body {
 }
 
 .action-links .btn {
-    width: auto;
+    flex: 1;
+    text-align: center;
+    padding: 10px 16px;
+    font-size: 14px;
+    line-height: 20px;
+    box-sizing: border-box;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-search {
+    background: #3498db;
 }

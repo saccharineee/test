@@ -1,5 +1,6 @@
 import os
 import secrets
+import json
 import time
 from collections import defaultdict
 from datetime import timedelta, datetime
@@ -17,6 +18,31 @@ app.config.update(
     SESSION_REFRESH_EACH_REQUEST=True,
 )
 app.debug = False
+
+# ==================== 安全响应头中间件 ====================
+class SecurityHeadersMiddleware:
+    def __init__(self, app):
+        self.app = app
+    def __call__(self, environ, start_response):
+        def custom_start_response(status, headers, exc_info=None):
+            added = set()
+            def set_header(key, value):
+                key_lower = key.lower()
+                for i, (k, v) in enumerate(headers):
+                    if k.lower() == key_lower:
+                        headers[i] = (key, value)
+                        added.add(key_lower)
+                        return
+                headers.append((key, value))
+                added.add(key_lower)
+            set_header("X-Frame-Options", "DENY")
+            set_header("X-Content-Type-Options", "nosniff")
+            set_header("X-XSS-Protection", "0")
+            set_header("Referrer-Policy", "strict-origin-when-cross-origin")
+            return start_response(status, headers, exc_info)
+        return self.app(environ, custom_start_response)
+
+app.wsgi_app = SecurityHeadersMiddleware(app.wsgi_app)
 
 # ==================== 隐藏 Server 头 ====================
 class ServerHeaderMiddleware:
@@ -49,7 +75,7 @@ if hasattr(_ws_serving, 'WSGIRequestHandler'):
     _ws_serving.WSGIRequestHandler.server_version = "Kangle/3.1"
     _ws_serving.WSGIRequestHandler.sys_version = ""
 
-# ==================== 数据库（安全路径） ====================
+# ==================== 数据库 ====================
 _DB_DIRS = ["/var/lib/user-manager", os.path.dirname(os.path.abspath(__file__))]
 for _d in _DB_DIRS:
     try:
@@ -70,8 +96,110 @@ def get_db():
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA foreign_keys=ON")
     return db
 
+# ==================== 速率限制持久化 ====================
+RATE_LIMIT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(RATE_LIMIT_DIR, exist_ok=True)
+RATE_STATE_PATH = os.path.join(RATE_LIMIT_DIR, "rate_state.json")
+LOGIN_RATE_LIMIT = 20
+LOGIN_RATE_WINDOW = timedelta(minutes=15)
+LOGIN_LOCK_THRESHOLD = 5
+LOGIN_LOCK_DURATION = timedelta(minutes=30)
+
+def _load_rate_state():
+    """从磁盘加载速率限制状态"""
+    try:
+        if os.path.exists(RATE_STATE_PATH):
+            with open(RATE_STATE_PATH, "r") as f:
+                data = json.load(f)
+            return data.get("login_attempts", {}), data.get("fake_user_attempts", {})
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}, {}
+
+def _save_rate_state(login_data, fake_data):
+    """将速率限制状态持久化到磁盘"""
+    try:
+        with open(RATE_STATE_PATH, "w") as f:
+            json.dump({
+                "login_attempts": login_data,
+                "fake_user_attempts": fake_data,
+                "updated_at": datetime.now().isoformat(),
+            }, f)
+    except OSError:
+        pass
+
+def _prune_rate_state(login_data, fake_data):
+    """清理过期的速率记录"""
+    now = datetime.now()
+    cutoff = (now - LOGIN_RATE_WINDOW).timestamp()
+    # 清理 login_attempts
+    pruned_login = {}
+    for ip, timestamps in login_data.items():
+        valid = [t for t in timestamps if t >= cutoff]
+        if valid:
+            pruned_login[ip] = valid
+    # 清理 fake_user_attempts（锁定已过期的重置）
+    pruned_fake = {}
+    for user, val in fake_data.items():
+        if isinstance(val, (int, float)):
+            if val > 0:
+                pruned_fake[user] = val
+            elif val < 0:
+                lock_exp = datetime.fromtimestamp(-val)
+                if now < lock_exp:
+                    pruned_fake[user] = val
+    return pruned_login, pruned_fake
+
+def check_rate_limit(ip):
+    """检查 IP 是否超出速率限制，返回 (是否允许, 错误信息)"""
+    login_data, fake_data = _load_rate_state()
+    now = datetime.now()
+    now_ts = time.time()
+    cutoff_ts = (now - LOGIN_RATE_WINDOW).timestamp()
+
+    ip_timestamps = login_data.get(ip, [])
+    ip_timestamps = [t for t in ip_timestamps if t >= cutoff_ts]
+
+    if len(ip_timestamps) >= LOGIN_RATE_LIMIT:
+        return False, "登录尝试过于频繁，请15分钟后再试"
+
+    ip_timestamps.append(now_ts)
+    login_data[ip] = ip_timestamps
+    login_data, fake_data = _prune_rate_state(login_data, fake_data)
+    _save_rate_state(login_data, fake_data)
+    return True, None
+
+def record_fake_attempt(username):
+    """记录不存在用户的登录尝试"""
+    login_data, fake_data = _load_rate_state()
+    val = fake_data.get(username, 0)
+    if isinstance(val, (int, float)) and val >= 0:
+        val = int(val) + 1
+        if val >= LOGIN_LOCK_THRESHOLD:
+            now = datetime.now()
+            lock_exp = now + LOGIN_LOCK_DURATION
+            val = -lock_exp.timestamp()
+        fake_data[username] = val
+    login_data, fake_data = _prune_rate_state(login_data, fake_data)
+    _save_rate_state(login_data, fake_data)
+
+def is_fake_user_locked(username):
+    """检查假用户是否在锁定期"""
+    login_data, fake_data = _load_rate_state()
+    val = fake_data.get(username)
+    if val is None:
+        return False
+    if isinstance(val, (int, float)) and val < 0:
+        now = datetime.now()
+        lock_exp = datetime.fromtimestamp(-val)
+        if now < lock_exp:
+            return True
+    return False
+
+# ==================== 数据库初始化 ====================
 def init_db():
     db = get_db()
     db.execute("""
@@ -103,15 +231,37 @@ def get_user(username):
     db.close()
     return dict(user) if user else None
 
-init_db()
+def create_user(username, password_hash, email, phone):
+    """创建用户（参数化查询，无注入风险）"""
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO users (username, password_hash, email, phone) VALUES (?, ?, ?, ?)",
+            (username, password_hash, email, phone),
+        )
+        db.commit()
+        return True, None
+    except sqlite3.IntegrityError:
+        return False, "用户名已存在"
+    except Exception as e:
+        return False, f"注册失败：{e}"
+    finally:
+        db.close()
 
-# ==================== 限速 + 账户锁定 ====================
-LOGIN_RATE_LIMIT = 20
-LOGIN_RATE_WINDOW = timedelta(minutes=15)
-LOGIN_LOCK_THRESHOLD = 5
-LOGIN_LOCK_DURATION = timedelta(minutes=30)
-login_attempts = defaultdict(list)
-fake_user_attempts = defaultdict(int)
+def search_users(keyword):
+    """搜索用户（参数化查询，无注入风险），仅限已登录用户"""
+    db = get_db()
+    try:
+        like_pattern = f"%{keyword}%"
+        rows = db.execute(
+            "SELECT id, username, email, phone FROM users WHERE username LIKE ? OR email LIKE ?",
+            (like_pattern, like_pattern),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+init_db()
 
 # ==================== 辅助函数 ====================
 
@@ -168,14 +318,16 @@ def login():
             else:
                 client_ip = request.remote_addr or "unknown"
                 now = datetime.now()
-                login_attempts[client_ip] = [
-                    t for t in login_attempts[client_ip]
-                    if now - t < LOGIN_RATE_WINDOW
-                ]
-                if len(login_attempts[client_ip]) >= LOGIN_RATE_LIMIT:
-                    error = "登录尝试过于频繁，请15分钟后再试"
+
+                # 先检查假用户是否在锁定期（防枚举延迟）
+                if is_fake_user_locked(username):
+                    # 假装检查了速率限制，返回统一错误
+                    pass
+
+                allowed, rate_error = check_rate_limit(client_ip)
+                if not allowed:
+                    error = rate_error
                 else:
-                    login_attempts[client_ip].append(now)
                     user = get_user(username)
 
                     if user and user.get("locked_until"):
@@ -196,7 +348,6 @@ def login():
                     elif user and bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
                         session_regenerate()
                         session["username"] = username
-                        fake_user_attempts.pop(username, None)
 
                         db = get_db()
                         db.execute("UPDATE users SET login_attempts=0, locked_until=NULL WHERE username=?", (username,))
@@ -224,9 +375,7 @@ def login():
                             db.commit()
                             db.close()
                         else:
-                            fake_user_attempts[username] += 1
-                            if fake_user_attempts[username] >= LOGIN_LOCK_THRESHOLD:
-                                fake_user_attempts[username] = -((now + LOGIN_LOCK_DURATION).timestamp())
+                            record_fake_attempt(username)
 
     return render_template(
         "login.html",
@@ -278,6 +427,45 @@ def change_password():
         success=success,
         csrf_token=session.get("_csrf_token", ""),
     )
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    error = None
+    success = None
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        email = request.form.get("email", "").strip()
+        phone = request.form.get("phone", "").strip()
+
+        if not username or not password:
+            error = "用户名和密码不能为空"
+        elif len(password) < 8:
+            error = "密码长度至少 8 位"
+        else:
+            # bcrypt 哈希后存入主数据库
+            password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+            ok, msg = create_user(username, password_hash, email, phone)
+            if ok:
+                success = True
+            else:
+                error = msg
+    return render_template("register.html", error=error, success=success)
+
+
+@app.route("/search")
+def search():
+    # 要求登录
+    username = session.get("username")
+    if not username:
+        return redirect("/login")
+
+    keyword = request.args.get("keyword", "").strip()
+    results = []
+    if keyword:
+        results = search_users(keyword)
+    return render_template("search.html", results=results, keyword=keyword)
 
 
 @app.route("/logout")

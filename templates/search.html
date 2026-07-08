@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h2>用户搜索</h2>
+    <form method="GET" action="/search" class="login-form">
+        <div class="form-group" style="display: flex; gap: 10px;">
+            <input type="text" name="keyword" placeholder="搜索用户名或邮箱..." value="{{ keyword or '' }}" style="flex: 1;">
+            <button type="submit" class="btn btn-primary" style="width: auto; padding: 10px 20px;">搜索</button>
+        </div>
+    </form>
+
+    {% if keyword %}
+        <h3 style="margin-top: 20px;">搜索结果：{{ keyword }}</h3>
+        {% if results %}
+        <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+            <thead>
+                <tr style="background: #f0f0f0;">
+                    <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">ID</th>
+                    <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">用户名</th>
+                    <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">邮箱</th>
+                    <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">手机</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in results %}
+                <tr>
+                    <td style="padding: 8px; border: 1px solid #ddd;">{{ r['id'] }}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd;">{{ r['username'] }}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd;">{{ r['email'] }}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd;">{{ r['phone'] }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="error-msg" style="margin-top: 15px;">无搜索结果</div>
+        {% endif %}
+    {% endif %}
+
+    <div style="margin-top: 20px;">
+        <a href="/" class="btn btn-secondary">返回首页</a>
+    </div>
+</div>
+{% endblock %}
