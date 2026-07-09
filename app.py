@@ -2,14 +2,19 @@ import os
 import secrets
 import json
 import time
+import re
 from collections import defaultdict
 from datetime import timedelta, datetime
 import sqlite3
 import bcrypt
-from flask import Flask, render_template, request, redirect, session, url_for
+import werkzeug.utils
+from flask import (
+    Flask, render_template, request, redirect, session, url_for, send_from_directory, abort
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
@@ -25,20 +30,24 @@ class SecurityHeadersMiddleware:
         self.app = app
     def __call__(self, environ, start_response):
         def custom_start_response(status, headers, exc_info=None):
-            added = set()
             def set_header(key, value):
                 key_lower = key.lower()
                 for i, (k, v) in enumerate(headers):
                     if k.lower() == key_lower:
                         headers[i] = (key, value)
-                        added.add(key_lower)
                         return
                 headers.append((key, value))
-                added.add(key_lower)
             set_header("X-Frame-Options", "DENY")
             set_header("X-Content-Type-Options", "nosniff")
             set_header("X-XSS-Protection", "0")
             set_header("Referrer-Policy", "strict-origin-when-cross-origin")
+            set_header("Content-Security-Policy",
+                "default-src 'self'; "
+                "img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "script-src 'self'; "
+                "base-uri 'self'; "
+                "form-action 'self'")
             return start_response(status, headers, exc_info)
         return self.app(environ, custom_start_response)
 
@@ -109,7 +118,6 @@ LOGIN_LOCK_THRESHOLD = 5
 LOGIN_LOCK_DURATION = timedelta(minutes=30)
 
 def _load_rate_state():
-    """从磁盘加载速率限制状态"""
     try:
         if os.path.exists(RATE_STATE_PATH):
             with open(RATE_STATE_PATH, "r") as f:
@@ -120,7 +128,6 @@ def _load_rate_state():
     return {}, {}
 
 def _save_rate_state(login_data, fake_data):
-    """将速率限制状态持久化到磁盘"""
     try:
         with open(RATE_STATE_PATH, "w") as f:
             json.dump({
@@ -132,16 +139,13 @@ def _save_rate_state(login_data, fake_data):
         pass
 
 def _prune_rate_state(login_data, fake_data):
-    """清理过期的速率记录"""
     now = datetime.now()
     cutoff = (now - LOGIN_RATE_WINDOW).timestamp()
-    # 清理 login_attempts
     pruned_login = {}
     for ip, timestamps in login_data.items():
         valid = [t for t in timestamps if t >= cutoff]
         if valid:
             pruned_login[ip] = valid
-    # 清理 fake_user_attempts（锁定已过期的重置）
     pruned_fake = {}
     for user, val in fake_data.items():
         if isinstance(val, (int, float)):
@@ -154,18 +158,14 @@ def _prune_rate_state(login_data, fake_data):
     return pruned_login, pruned_fake
 
 def check_rate_limit(ip):
-    """检查 IP 是否超出速率限制，返回 (是否允许, 错误信息)"""
     login_data, fake_data = _load_rate_state()
     now = datetime.now()
     now_ts = time.time()
     cutoff_ts = (now - LOGIN_RATE_WINDOW).timestamp()
-
     ip_timestamps = login_data.get(ip, [])
     ip_timestamps = [t for t in ip_timestamps if t >= cutoff_ts]
-
     if len(ip_timestamps) >= LOGIN_RATE_LIMIT:
         return False, "登录尝试过于频繁，请15分钟后再试"
-
     ip_timestamps.append(now_ts)
     login_data[ip] = ip_timestamps
     login_data, fake_data = _prune_rate_state(login_data, fake_data)
@@ -173,7 +173,6 @@ def check_rate_limit(ip):
     return True, None
 
 def record_fake_attempt(username):
-    """记录不存在用户的登录尝试"""
     login_data, fake_data = _load_rate_state()
     val = fake_data.get(username, 0)
     if isinstance(val, (int, float)) and val >= 0:
@@ -187,7 +186,6 @@ def record_fake_attempt(username):
     _save_rate_state(login_data, fake_data)
 
 def is_fake_user_locked(username):
-    """检查假用户是否在锁定期"""
     login_data, fake_data = _load_rate_state()
     val = fake_data.get(username)
     if val is None:
@@ -216,6 +214,11 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # 为已有表添加 password_changed_at 列（幂等）
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMP DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
     count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     if count == 0:
         db.execute("INSERT INTO users (username, password_hash, role, email, phone, balance) VALUES (?,?,?,?,?,?)",
@@ -231,13 +234,22 @@ def get_user(username):
     db.close()
     return dict(user) if user else None
 
+def _sanitize_username(username):
+    """仅允许字母、数字、中文、下划线、连字符，过滤特殊字符"""
+    sanitized = re.sub(r'[^\w\u4e00-\u9fff\-]', '', username)
+    return sanitized.strip()[:32]
+
+
 def create_user(username, password_hash, email, phone):
-    """创建用户（参数化查询，无注入风险）"""
     db = get_db()
     try:
+        # 对用户名进行过滤，防止SQL注入字符和XSS payload入库
+        clean_username = _sanitize_username(username)
+        if not clean_username or len(clean_username) < 2:
+            return False, "用户名包含非法字符，请使用字母、数字、中文或下划线"
         db.execute(
             "INSERT INTO users (username, password_hash, email, phone) VALUES (?, ?, ?, ?)",
-            (username, password_hash, email, phone),
+            (clean_username, password_hash, email, phone),
         )
         db.commit()
         return True, None
@@ -248,8 +260,33 @@ def create_user(username, password_hash, email, phone):
     finally:
         db.close()
 
+def _mask_phone(phone):
+    """手机号脱敏：13800138000 -> 138****8000"""
+    if phone and len(phone) >= 7:
+        return phone[:3] + "****" + phone[-4:]
+    return phone or ""
+
+
+def _mask_email(email):
+    """邮箱脱敏：admin@example.com -> a***@example.com"""
+    if email and "@" in email:
+        local, domain = email.split("@", 1)
+        if len(local) >= 2:
+            return local[0] + "***@" + domain
+        return local[0] + "***@" + domain
+    return email or ""
+
+
+def _check_default_password(user):
+    """检查用户是否还在使用初始默认密码"""
+    if user and user.get("password_hash"):
+        for default_pwd in [b"admin123", b"alice2025"]:
+            if bcrypt.checkpw(default_pwd, user["password_hash"].encode()):
+                return True
+    return False
+
+
 def search_users(keyword):
-    """搜索用户（参数化查询，无注入风险），仅限已登录用户"""
     db = get_db()
     try:
         like_pattern = f"%{keyword}%"
@@ -257,19 +294,114 @@ def search_users(keyword):
             "SELECT id, username, email, phone FROM users WHERE username LIKE ? OR email LIKE ?",
             (like_pattern, like_pattern),
         ).fetchall()
-        return [dict(r) for r in rows]
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["email"] = _mask_email(d.get("email", ""))
+            d["phone"] = _mask_phone(d.get("phone", ""))
+            results.append(d)
+        return results
     finally:
         db.close()
 
 init_db()
 
+# ==================== Session 密码变更校验 ====================
+def _get_password_changed_at(username):
+    db = get_db()
+    try:
+        row = db.execute("SELECT password_changed_at FROM users WHERE username=?", (username,)).fetchone()
+        if row and row["password_changed_at"]:
+            return datetime.fromisoformat(row["password_changed_at"]).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        pass
+    finally:
+        db.close()
+    return None
+
+def invalidate_session_after_password_change():
+    username = session.get("username")
+    login_time = session.get("_login_time")
+    if username and login_time:
+        changed_at = _get_password_changed_at(username)
+        if changed_at and login_time < changed_at:
+            session.clear()
+            session.modified = True
+
+app.before_request(invalidate_session_after_password_change)
+
+# ==================== 上传配置 ====================
+UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# 安全的文件扩展名白名单（不含SVG——SVG可嵌入JS导致存储型XSS）
+ALLOWED_EXTENSIONS = {
+    "jpg", "jpeg", "png", "gif", "bmp", "webp",
+    "ico", "tiff", "tif",
+}
+
+# 文件魔数签名校验 (magic bytes)
+FILE_MAGIC_SIGNATURES = {
+    b"\xff\xd8\xff":           {"jpg", "jpeg"},
+    b"\x89PNG\r\n\x1a\n":       {"png"},
+    b"GIF87a":                  {"gif"},
+    b"GIF89a":                  {"gif"},
+    b"BM":                      {"bmp"},
+    b"RIFF":                    {"webp"},  # WEBP 以 RIFF 开头
+    b"\x00\x00\x01\x00":         {"ico"},
+    b"MM\x00*":                  {"tiff", "tif"},
+    b"II*\x00":                  {"tiff", "tif"},
+}
+
+# 最小文件大小（字节），防止空文件
+MIN_FILE_SIZE = 100
+
+# 每个用户头像数量限制
+MAX_FILES_PER_USER = 5
+
+
+def _safe_filename(filename):
+    """防止路径穿越 + 只允许安全的扩展名"""
+    if not filename or filename == ".":
+        return None
+    # 路径穿越防护
+    safe = werkzeug.utils.secure_filename(filename)
+    if not safe:
+        return None
+    # 扩展名白名单检查
+    ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return None
+    return safe
+
+
+def _check_file_magic(file_data, extension):
+    """校验文件魔数是否匹配声明的扩展名"""
+    for magic, exts in FILE_MAGIC_SIGNATURES.items():
+        if file_data[:len(magic)] == magic:
+            return extension in exts
+    return False
+
+
+def _sanitize_svg(filepath):
+    """此函数不再使用——SVG已被从白名单移除"""
+    pass
+
+
+def _random_filename(original_ext):
+    """生成随机UUID文件名，防止文件名枚举和冲突"""
+    random_name = secrets.token_hex(16)
+    return f"{random_name}.{original_ext}"
+
 # ==================== 辅助函数 ====================
 
 def session_regenerate():
+    """登录后完全重建session，防会话固定"""
     for key in list(session.keys()):
         del session[key]
     session["_csrf_token"] = secrets.token_hex(32)
     session["_session_id"] = secrets.token_hex(16)
+    session["_login_time"] = time.time()
     session.permanent = True
 
 # ==================== 路由 ====================
@@ -282,18 +414,14 @@ def index():
     if username:
         user = get_user(username)
         if user:
+            is_default_pwd = _check_default_password(user)
             user_info = {
                 "username": user["username"],
-                "password": "*** 已加密 ***",
-                "email": user["email"],
-                "phone": user["phone"],
+                "email": _mask_email(user.get("email", "")),
+                "phone": _mask_phone(user.get("phone", "")),
                 "role": user["role"],
                 "balance": user["balance"],
             }
-            if bcrypt.checkpw(b"admin123", user["password_hash"].encode()):
-                is_default_pwd = True
-            elif bcrypt.checkpw(b"alice2025", user["password_hash"].encode()):
-                is_default_pwd = True
     return render_template("index.html", username=username, user=user_info, show_pwd_warning=is_default_pwd)
 
 
@@ -310,6 +438,9 @@ def login():
         if not stored_token or not secrets.compare_digest(stored_token, form_token):
             error = "表单验证失败，请重试"
         else:
+            # 登录后刷新 CSRF token，防重放
+            session["_csrf_token"] = secrets.token_hex(32)
+
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "")
 
@@ -319,15 +450,15 @@ def login():
                 client_ip = request.remote_addr or "unknown"
                 now = datetime.now()
 
-                # 先检查假用户是否在锁定期（防枚举延迟）
                 if is_fake_user_locked(username):
-                    # 假装检查了速率限制，返回统一错误
-                    pass
+                    error = "账户已被临时锁定，请30分钟后再试"
 
-                allowed, rate_error = check_rate_limit(client_ip)
-                if not allowed:
-                    error = rate_error
-                else:
+                if not error:
+                    allowed, rate_error = check_rate_limit(client_ip)
+                    if not allowed:
+                        error = rate_error
+
+                if not error:
                     user = get_user(username)
 
                     if user and user.get("locked_until"):
@@ -356,9 +487,8 @@ def login():
 
                         user_info = {
                             "username": user["username"],
-                            "password": "*** 已加密 ***",
-                            "email": user["email"],
-                            "phone": user["phone"],
+                            "email": _mask_email(user.get("email", "")),
+                            "phone": _mask_phone(user.get("phone", "")),
                             "role": user["role"],
                             "balance": user["balance"],
                         }
@@ -399,6 +529,8 @@ def change_password():
         if not stored_token or not secrets.compare_digest(stored_token, form_token):
             error = "表单验证失败，请重试"
         else:
+            session["_csrf_token"] = secrets.token_hex(32)
+
             old_pw = request.form.get("old_password", "")
             new_pw = request.form.get("new_password", "")
             confirm_pw = request.form.get("confirm_password", "")
@@ -409,15 +541,21 @@ def change_password():
                 error = "两次输入的新密码不一致"
             elif len(new_pw) < 8:
                 error = "新密码长度至少 8 位"
+            elif len(new_pw) > 128:
+                error = "新密码过长"
             else:
                 user = get_user(username)
                 if user and bcrypt.checkpw(old_pw.encode(), user["password_hash"].encode()):
                     new_hash = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
                     db = get_db()
-                    db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, username))
+                    db.execute("UPDATE users SET password_hash=?, password_changed_at=? WHERE username=?",
+                        (new_hash, datetime.now().isoformat(), username))
                     db.commit()
                     db.close()
-                    success = "密码修改成功"
+                    # 销毁当前 session，迫使重新登录
+                    session.clear()
+                    session.modified = True
+                    success = "密码修改成功，请重新登录"
                 else:
                     error = "旧密码错误"
 
@@ -433,30 +571,48 @@ def change_password():
 def register():
     error = None
     success = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        email = request.form.get("email", "").strip()
-        phone = request.form.get("phone", "").strip()
 
-        if not username or not password:
-            error = "用户名和密码不能为空"
-        elif len(password) < 8:
-            error = "密码长度至少 8 位"
+    if "_csrf_token" not in session:
+        session["_csrf_token"] = secrets.token_hex(32)
+
+    if request.method == "POST":
+        stored_token = session.get("_csrf_token", "")
+        form_token = request.form.get("_csrf_token", "")
+        if not stored_token or not secrets.compare_digest(stored_token, form_token):
+            error = "表单验证失败，请重试"
         else:
-            # bcrypt 哈希后存入主数据库
-            password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-            ok, msg = create_user(username, password_hash, email, phone)
-            if ok:
-                success = True
+            session["_csrf_token"] = secrets.token_hex(32)
+
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+            email = request.form.get("email", "").strip()
+            phone = request.form.get("phone", "").strip()
+
+            if not username or not password:
+                error = "用户名和密码不能为空"
+            elif len(password) < 8:
+                error = "密码长度至少 8 位"
+            elif len(password) > 128:
+                error = "密码过长"
+            elif len(username) > 32:
+                error = "用户名过长"
+            elif len(email) > 64:
+                error = "邮箱地址过长"
+            elif len(phone) > 20:
+                error = "手机号过长"
             else:
-                error = msg
-    return render_template("register.html", error=error, success=success)
+                password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+                ok, msg = create_user(username, password_hash, email, phone)
+                if ok:
+                    success = True
+                else:
+                    error = msg
+    return render_template("register.html", error=error, success=success,
+        csrf_token=session.get("_csrf_token", ""))
 
 
 @app.route("/search")
 def search():
-    # 要求登录
     username = session.get("username")
     if not username:
         return redirect("/login")
@@ -466,6 +622,80 @@ def search():
     if keyword:
         results = search_users(keyword)
     return render_template("search.html", results=results, keyword=keyword)
+
+
+@app.route("/upload", methods=["GET", "POST"])
+def upload():
+    username = session.get("username")
+    if not username:
+        return redirect("/login")
+
+    error = None
+    uploaded_url = None
+
+    if "_csrf_token" not in session:
+        session["_csrf_token"] = secrets.token_hex(32)
+
+    if request.method == "POST":
+        stored_token = session.get("_csrf_token", "")
+        form_token = request.form.get("_csrf_token", "")
+        if not stored_token or not secrets.compare_digest(stored_token, form_token):
+            error = "表单验证失败，请重试"
+            return render_template("upload.html", error=error, uploaded_url=None,
+                csrf_token=session.get("_csrf_token", ""))
+
+        session["_csrf_token"] = secrets.token_hex(32)
+
+        file = request.files.get("file")
+        if not file or file.filename == "":
+            error = "请选择要上传的文件"
+        else:
+            filename = _safe_filename(file.filename)
+            if filename is None:
+                error = "不支持的文件类型，仅允许图片文件（jpg/png/gif/bmp/webp/ico/tiff）"
+                return render_template("upload.html", error=error, uploaded_url=None,
+                    csrf_token=session.get("_csrf_token", ""))
+
+            ext = filename.rsplit(".", 1)[-1].lower()
+
+            # 读取文件头做魔数校验
+            file.seek(0)
+            file_data = file.read(16)
+            file.seek(0)
+
+            if not _check_file_magic(file_data, ext):
+                error = "文件内容与扩展名不匹配，请上传真实的图片文件"
+                return render_template("upload.html", error=error, uploaded_url=None,
+                    csrf_token=session.get("_csrf_token", ""))
+
+            # 检查文件最小大小
+            file.seek(0, os.SEEK_END)
+            file_size = file.tell()
+            file.seek(0)
+
+            if file_size < MIN_FILE_SIZE:
+                error = f"文件太小（{file_size} 字节），至少需要 {MIN_FILE_SIZE} 字节"
+                return render_template("upload.html", error=error, uploaded_url=None,
+                    csrf_token=session.get("_csrf_token", ""))
+
+            # 使用随机文件名
+            safe_name = _random_filename(ext)
+            save_path = os.path.join(UPLOAD_FOLDER, safe_name)
+
+            # 如果文件名冲突则重试
+            retries = 0
+            while os.path.exists(save_path) and retries < 10:
+                safe_name = _random_filename(ext)
+                save_path = os.path.join(UPLOAD_FOLDER, safe_name)
+                retries += 1
+
+            file.save(save_path)
+            # 确保上传文件权限安全
+            os.chmod(save_path, 0o644)
+            uploaded_url = f"/static/uploads/{safe_name}"
+
+    return render_template("upload.html", error=error, uploaded_url=uploaded_url,
+        csrf_token=session.get("_csrf_token", ""))
 
 
 @app.route("/logout")

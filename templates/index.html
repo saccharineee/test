@@ -11,7 +11,6 @@
     <h3>用户信息</h3>
     <ul class="info-list">
         <li><span class="label">用户名：</span>{{ user['username'] }}</li>
-        <li><span class="label">密码：</span>{{ user['password'] }}</li>
         <li><span class="label">邮箱：</span>{{ user['email'] }}</li>
         <li><span class="label">手机：</span>{{ user['phone'] }}</li>
         <li><span class="label">角色：</span>{{ user['role'] }}</li>
@@ -20,6 +19,7 @@
     <div class="action-links">
         <a href="/change-password" class="btn btn-warning">修改密码</a>
         <a href="/search" class="btn btn-primary btn-search">搜索用户</a>
+        <a href="/upload" class="btn btn-primary">上传头像</a>
         <a href="/logout" class="btn btn-danger">退出登录</a>
     </div>
 </div>

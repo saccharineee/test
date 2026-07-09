@@ -1,8 +1,28 @@
+# 日志
+*.log
+
+# 数据库（应使用外部路径）
+users.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 速率限制状态
+data/
+
+# 上传文件
+static/uploads/*
+
+# Python 缓存
 __pycache__/
 *.pyc
-flask.log
-flask_new.log
-*.db
-data/
+
+# 审计报告
 完整漏洞审计报告.docx
+penetration_test_report.md
 gen_sql_report.py
+
+# 操作系统
+.DS_Store
+Thumbs.db

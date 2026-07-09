@@ -233,3 +233,26 @@ body {
 .btn-search {
     background: #3498db;
 }
+
+.upload-success {
+    margin-top: 20px;
+    padding: 15px;
+    background: #e8f5e9;
+    border: 1px solid #a5d6a7;
+    border-radius: 8px;
+}
+
+.upload-success h3 {
+    color: #2e7d32;
+    margin-bottom: 10px;
+}
+
+.upload-success p {
+    color: #333;
+    font-size: 14px;
+}
+
+.upload-success a {
+    color: #1565c0;
+    word-break: break-all;
+}
