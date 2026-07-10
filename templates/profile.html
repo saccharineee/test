@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    {% if error %}
+    <div class="error-msg">{{ error }}</div>
+    {% elif user %}
+    <h2>个人中心</h2>
+    <ul class="info-list">
+        <li><span class="label">ID：</span>{{ user['id'] }}</li>
+        <li><span class="label">用户名：</span>{{ user['username'] }}</li>
+        <li><span class="label">邮箱：</span>{{ user['email'] }}</li>
+        <li><span class="label">手机：</span>{{ user['phone'] }}</li>
+        <li><span class="label">余额：</span>{{ user['balance'] }}</li>
+    </ul>
+
+    <h3>充值</h3>
+    <form action="/recharge" method="post" class="recharge-form">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="user_id" value="{{ user['id'] }}">
+        <div class="form-group">
+            <label for="amount">充值金额</label>
+            <input type="number" name="amount" id="amount" min="0" required>
+        </div>
+        <button type="submit" class="btn btn-primary">充值</button>
+    </form>
+    {% endif %}
+</div>
+{% endblock %}

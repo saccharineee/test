@@ -17,6 +17,7 @@
         <li><span class="label">余额：</span>{{ user['balance'] }}</li>
     </ul>
     <div class="action-links">
+        <a href="/profile?user_id={{ user['id'] }}" class="btn btn-primary">个人中心</a>
         <a href="/change-password" class="btn btn-warning">修改密码</a>
         <a href="/search" class="btn btn-primary btn-search">搜索用户</a>
         <a href="/upload" class="btn btn-primary">上传头像</a>

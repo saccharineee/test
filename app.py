@@ -234,6 +234,13 @@ def get_user(username):
     db.close()
     return dict(user) if user else None
 
+
+def get_user_by_id(user_id):
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    db.close()
+    return dict(user) if user else None
+
 def _sanitize_username(username):
     """仅允许字母、数字、中文、下划线、连字符，过滤特殊字符"""
     sanitized = re.sub(r'[^\w\u4e00-\u9fff\-]', '', username)
@@ -404,6 +411,78 @@ def session_regenerate():
     session["_login_time"] = time.time()
     session.permanent = True
 
+# ==================== 个人中心和充值 ====================
+
+@app.route("/profile")
+def profile():
+    username = session.get("username")
+    if not username:
+        return redirect("/login")
+
+    if "_csrf_token" not in session:
+        session["_csrf_token"] = secrets.token_hex(32)
+
+    # 强制显示当前登录用户的资料，忽略 URL 中的 user_id
+    current_user = get_user(username)
+    if not current_user:
+        return redirect("/login")
+    display_user = dict(current_user)
+    display_user["email"] = _mask_email(current_user.get("email", ""))
+    display_user["phone"] = _mask_phone(current_user.get("phone", ""))
+    return render_template("profile.html", user=display_user, error=None,
+        csrf_token=session.get("_csrf_token", ""))
+
+
+@app.route("/recharge", methods=["POST"])
+def recharge():
+    username = session.get("username")
+    if not username:
+        return redirect("/login")
+
+    # CSRF 校验
+    stored_token = session.get("_csrf_token", "")
+    form_token = request.form.get("_csrf_token", "")
+    if not stored_token or not secrets.compare_digest(stored_token, form_token):
+        user_id_param = request.form.get("user_id", type=int)
+        return redirect(f"/profile?user_id={user_id_param or ''}")
+
+    amount = request.form.get("amount", type=int, default=0)
+
+    # 强制使用当前登录用户的 ID，防止篡改表单中的 user_id 给他人充值
+    current_user = get_user(username)
+    if not current_user:
+        return redirect("/login")
+    user_id = current_user["id"]
+
+    if amount < 0:
+        display_user = dict(current_user)
+        display_user["email"] = _mask_email(current_user.get("email", ""))
+        display_user["phone"] = _mask_phone(current_user.get("phone", ""))
+        return render_template("profile.html", user=display_user,
+            error="充值金额不能为负数",
+            csrf_token=session.get("_csrf_token", ""))
+
+    new_balance = current_user["balance"] + amount
+    db = get_db()
+    db.execute("UPDATE users SET balance=? WHERE id=?", (new_balance, user_id))
+    db.commit()
+    db.close()
+    return redirect(f"/profile?user_id={user_id}")
+
+
+# ==================== 模板上下文注入 ====================
+
+@app.context_processor
+def inject_user_profile():
+    """向所有模板注入当前登录用户的 user_id（如果有）"""
+    username = session.get("username")
+    if username:
+        user = get_user(username)
+        if user:
+            return {"logged_in_user_id": user["id"]}
+    return {"logged_in_user_id": None}
+
+
 # ==================== 路由 ====================
 
 @app.route("/")
@@ -416,6 +495,7 @@ def index():
         if user:
             is_default_pwd = _check_default_password(user)
             user_info = {
+                "id": user["id"],
                 "username": user["username"],
                 "email": _mask_email(user.get("email", "")),
                 "phone": _mask_phone(user.get("phone", "")),
@@ -486,6 +566,7 @@ def login():
                         db.close()
 
                         user_info = {
+                            "id": user["id"],
                             "username": user["username"],
                             "email": _mask_email(user.get("email", "")),
                             "phone": _mask_phone(user.get("phone", "")),
@@ -555,7 +636,12 @@ def change_password():
                     # 销毁当前 session，迫使重新登录
                     session.clear()
                     session.modified = True
-                    success = "密码修改成功，请重新登录"
+                    return render_template(
+                        "change_password.html",
+                        error=None,
+                        success="密码修改成功，请重新登录",
+                        csrf_token=secrets.token_hex(32),
+                    )
                 else:
                     error = "旧密码错误"
 
