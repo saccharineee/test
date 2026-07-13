@@ -483,6 +483,53 @@ def inject_user_profile():
     return {"logged_in_user_id": None}
 
 
+# ==================== 动态页面加载 ====================
+
+@app.route("/page")
+def page():
+    name = request.args.get("name", "")
+    page_content = None
+
+    if name:
+        # 路径穿越防护：解析为绝对路径并验证是否在 pages/ 目录下
+        pages_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
+        # 对 name 做基本过滤：只允许字母、数字、下划线、连字符、点
+        safe_name = re.sub(r'[^\w\-. ]', '', name)
+        # 防止路径穿越：用 abspath 归一化后检查前缀
+        filepath = os.path.join(pages_dir, safe_name)
+        filepath = os.path.abspath(filepath)
+        if not filepath.startswith(os.path.abspath(pages_dir) + os.sep):
+            page_content = "页面不存在"
+        elif os.path.isfile(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                page_content = f.read()
+        else:
+            filepath_html = filepath + ".html"
+            if os.path.isfile(filepath_html):
+                with open(filepath_html, "r", encoding="utf-8") as f:
+                    page_content = f.read()
+            else:
+                page_content = "页面不存在"
+
+    username = session.get("username")
+    user_info = None
+    is_default_pwd = False
+    if username:
+        user = get_user(username)
+        if user:
+            is_default_pwd = _check_default_password(user)
+            user_info = {
+                "id": user["id"],
+                "username": user["username"],
+                "email": _mask_email(user.get("email", "")),
+                "phone": _mask_phone(user.get("phone", "")),
+                "role": user["role"],
+                "balance": user["balance"],
+            }
+    return render_template("index.html", username=username, user=user_info,
+        show_pwd_warning=is_default_pwd, page_content=page_content)
+
+
 # ==================== 路由 ====================
 
 @app.route("/")
