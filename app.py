@@ -489,9 +489,7 @@ def page():
     name = request.args.get("name", "")
     page_content = None
 
-    if not name:
-        page_content = "请输入页面名称"
-    else:
+    if name:
         # 路径穿越防护：解析为绝对路径并验证是否在 pages/ 目录下
         pages_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
         # 对 name 做基本过滤：只允许字母、数字、下划线、连字符、点
@@ -528,7 +526,7 @@ def page():
                 "balance": user["balance"],
             }
     return render_template("index.html", username=username, user=user_info,
-        page_content=page_content)
+        show_pwd_warning=is_default_pwd, page_content=page_content)
 
 
 # ==================== 路由 ====================
