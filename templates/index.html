@@ -11,11 +11,6 @@
 {% if username and user %}
 <div class="card welcome-card">
     <h2>欢迎回来，{{ username }}！</h2>
-    {% if show_pwd_warning %}
-    <div class="warning-msg">
-        ⚠️ 您正在使用默认密码，建议立即 <a href="/change-password">修改密码</a>
-    </div>
-    {% endif %}
     <h3>用户信息</h3>
     <ul class="info-list">
         <li><span class="label">用户名：</span>{{ user['username'] }}</li>

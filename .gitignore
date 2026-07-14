@@ -26,3 +26,11 @@ gen_sql_report.py
 # 操作系统
 .DS_Store
 Thumbs.db
+
+# 本地生成脚本（非必须运行）
+gen_report.py
+gen_sql_report.py
+
+# 日志/数据
+*.log
+data/

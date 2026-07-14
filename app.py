@@ -18,7 +18,6 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=False,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=2),
     SESSION_REFRESH_EACH_REQUEST=True,
 )
@@ -44,7 +43,7 @@ class SecurityHeadersMiddleware:
             set_header("Content-Security-Policy",
                 "default-src 'self'; "
                 "img-src 'self' data:; "
-                "style-src 'self' 'unsafe-inline'; "
+                "style-src 'self'; "
                 "script-src 'self'; "
                 "base-uri 'self'; "
                 "form-action 'self'")
@@ -490,7 +489,9 @@ def page():
     name = request.args.get("name", "")
     page_content = None
 
-    if name:
+    if not name:
+        page_content = "请输入页面名称"
+    else:
         # 路径穿越防护：解析为绝对路径并验证是否在 pages/ 目录下
         pages_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
         # 对 name 做基本过滤：只允许字母、数字、下划线、连字符、点
@@ -527,7 +528,7 @@ def page():
                 "balance": user["balance"],
             }
     return render_template("index.html", username=username, user=user_info,
-        show_pwd_warning=is_default_pwd, page_content=page_content)
+        page_content=page_content)
 
 
 # ==================== 路由 ====================
@@ -549,7 +550,7 @@ def index():
                 "role": user["role"],
                 "balance": user["balance"],
             }
-    return render_template("index.html", username=username, user=user_info, show_pwd_warning=is_default_pwd)
+    return render_template("index.html", username=username, user=user_info)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -620,7 +621,7 @@ def login():
                             "role": user["role"],
                             "balance": user["balance"],
                         }
-                        return render_template("index.html", username=username, user=user_info, show_pwd_warning=True)
+                        return render_template("index.html", username=username, user=user_info)
                     else:
                         error = "用户名或密码错误"
                         if user:
@@ -648,56 +649,63 @@ def change_password():
     if not username:
         return redirect("/login")
 
-    error = None
-    success = None
+    if "_csrf_token" not in session:
+        session["_csrf_token"] = secrets.token_hex(32)
 
-    if request.method == "POST":
-        stored_token = session.get("_csrf_token", "")
-        form_token = request.form.get("_csrf_token", "")
-        if not stored_token or not secrets.compare_digest(stored_token, form_token):
-            error = "表单验证失败，请重试"
-        else:
-            session["_csrf_token"] = secrets.token_hex(32)
+    if request.method == "GET":
+        return render_template("change_password.html",
+            username=username,
+            error=request.args.get("error", ""),
+            success=request.args.get("success", ""),
+            csrf_token=session.get("_csrf_token", ""))
 
-            old_pw = request.form.get("old_password", "")
-            new_pw = request.form.get("new_password", "")
-            confirm_pw = request.form.get("confirm_password", "")
+    # CSRF 校验
+    stored_token = session.get("_csrf_token", "")
+    form_token = request.form.get("_csrf_token", "")
+    if not stored_token or not secrets.compare_digest(stored_token, form_token):
+        return render_template("change_password.html",
+            username=username,
+            error="表单验证失败，请重试",
+            success="",
+            csrf_token=session.get("_csrf_token", ""))
 
-            if not old_pw or not new_pw or not confirm_pw:
-                error = "请填写所有字段"
-            elif new_pw != confirm_pw:
-                error = "两次输入的新密码不一致"
-            elif len(new_pw) < 8:
-                error = "新密码长度至少 8 位"
-            elif len(new_pw) > 128:
-                error = "新密码过长"
-            else:
-                user = get_user(username)
-                if user and bcrypt.checkpw(old_pw.encode(), user["password_hash"].encode()):
-                    new_hash = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
-                    db = get_db()
-                    db.execute("UPDATE users SET password_hash=?, password_changed_at=? WHERE username=?",
-                        (new_hash, datetime.now().isoformat(), username))
-                    db.commit()
-                    db.close()
-                    # 销毁当前 session，迫使重新登录
-                    session.clear()
-                    session.modified = True
-                    return render_template(
-                        "change_password.html",
-                        error=None,
-                        success="密码修改成功，请重新登录",
-                        csrf_token=secrets.token_hex(32),
-                    )
-                else:
-                    error = "旧密码错误"
+    session["_csrf_token"] = secrets.token_hex(32)
 
-    return render_template(
-        "change_password.html",
-        error=error,
-        success=success,
-        csrf_token=session.get("_csrf_token", ""),
-    )
+    new_pw = request.form.get("new_password", "")
+    confirm_pw = request.form.get("confirm_password", "")
+
+    if not new_pw or not confirm_pw:
+        return render_template("change_password.html",
+            username=username, error="请填写所有字段", success="",
+            csrf_token=session.get("_csrf_token", ""))
+    
+    if new_pw != confirm_pw:
+        return render_template("change_password.html",
+            username=username, error="两次输入的新密码不一致", success="",
+            csrf_token=session.get("_csrf_token", ""))
+    
+    if len(new_pw) < 8:
+        return render_template("change_password.html",
+            username=username, error="新密码长度至少 8 位", success="",
+            csrf_token=session.get("_csrf_token", ""))
+    
+    if len(new_pw) > 128:
+        return render_template("change_password.html",
+            username=username, error="新密码过长", success="",
+            csrf_token=session.get("_csrf_token", ""))
+
+    new_hash = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    db = get_db()
+    db.execute("UPDATE users SET password_hash=?, password_changed_at=? WHERE username=?",
+        (new_hash, datetime.now().isoformat(), username))
+    db.commit()
+    db.close()
+
+    return render_template("change_password.html",
+        username=username,
+        error="",
+        success="密码修改成功",
+        csrf_token=session.get("_csrf_token", ""))
 
 
 @app.route("/register", methods=["GET", "POST"])
