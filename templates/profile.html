@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-    {% if request.args.get('error') %}
-    <div class="error-msg">{{ request.args.get('error') }}</div>
+    {% if error %}
+    <div class="error-msg">{{ error }}</div>
     {% endif %}
-    {% if request.args.get('success') %}
-    <div class="success-msg">{{ request.args.get('success') }}</div>
+    {% if success %}
+    <div class="success-msg">{{ success }}</div>
     {% endif %}
     {% if user %}
     <h2>个人中心</h2>
@@ -20,7 +20,6 @@
     <h3>充值</h3>
     <form action="/recharge" method="post" class="recharge-form">
         <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="user_id" value="{{ user['id'] }}">
         <div class="form-group">
             <label for="amount">充值金额</label>
             <input type="number" name="amount" id="amount" min="0" required>

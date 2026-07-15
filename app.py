@@ -3,6 +3,9 @@ import secrets
 import json
 import time
 import re
+import urllib.request
+import urllib.error
+import urllib.parse
 from collections import defaultdict
 from datetime import timedelta, datetime
 import sqlite3
@@ -442,8 +445,7 @@ def recharge():
     stored_token = session.get("_csrf_token", "")
     form_token = request.form.get("_csrf_token", "")
     if not stored_token or not secrets.compare_digest(stored_token, form_token):
-        user_id_param = request.form.get("user_id", type=int)
-        return redirect(f"/profile?user_id={user_id_param or ''}")
+        return redirect("/profile")
 
     amount = request.form.get("amount", type=int, default=0)
 
@@ -466,7 +468,7 @@ def recharge():
     db.execute("UPDATE users SET balance=? WHERE id=?", (new_balance, user_id))
     db.commit()
     db.close()
-    return redirect(f"/profile?user_id={user_id}")
+    return redirect("/profile")
 
 
 # ==================== 模板上下文注入 ====================
@@ -526,7 +528,8 @@ def page():
                 "balance": user["balance"],
             }
     return render_template("index.html", username=username, user=user_info,
-        show_pwd_warning=is_default_pwd, page_content=page_content)
+        show_pwd_warning=is_default_pwd, page_content=page_content,
+        fetch_error=None, fetch_status=None, fetch_content=None)
 
 
 # ==================== 路由 ====================
@@ -548,7 +551,8 @@ def index():
                 "role": user["role"],
                 "balance": user["balance"],
             }
-    return render_template("index.html", username=username, user=user_info)
+    return render_template("index.html", username=username, user=user_info,
+        fetch_error=None, fetch_status=None, fetch_content=None)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -619,7 +623,8 @@ def login():
                             "role": user["role"],
                             "balance": user["balance"],
                         }
-                        return render_template("index.html", username=username, user=user_info)
+                        return render_template("index.html", username=username, user=user_info,
+                            fetch_error=None, fetch_status=None, fetch_content=None)
                     else:
                         error = "用户名或密码错误"
                         if user:
@@ -817,8 +822,15 @@ def upload():
                 return render_template("upload.html", error=error, uploaded_url=None,
                     csrf_token=session.get("_csrf_token", ""))
 
-            # 使用随机文件名
-            safe_name = _random_filename(ext)
+            # 检查用户上传数量限制
+            existing_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.startswith(username + "_")]
+            if len(existing_files) >= MAX_FILES_PER_USER:
+                error = f"每个用户最多上传 {MAX_FILES_PER_USER} 个文件"
+                return render_template("upload.html", error=error, uploaded_url=None,
+                    csrf_token=session.get("_csrf_token", ""))
+
+            # 使用随机文件名，包含用户名前缀便于计数
+            safe_name = f"{username}_{_random_filename(ext)}"
             save_path = os.path.join(UPLOAD_FOLDER, safe_name)
 
             # 如果文件名冲突则重试
@@ -843,6 +855,64 @@ def logout():
     session.modified = True
     resp = redirect("/")
     return resp
+
+
+# ==================== URL 抓取 ====================
+
+def _is_safe_url(url):
+    """检查 URL 是否安全，防止 SSRF"""
+    parsed = urllib.parse.urlparse(url)
+    # 只允许 http/https 协议
+    if parsed.scheme not in ("http", "https"):
+        return False, "不支持的 URL 协议，仅允许 http:// 和 https://"
+    return True, None
+
+
+@app.route("/fetch-url", methods=["POST"])
+def fetch_url():
+    username = session.get("username")
+    if not username:
+        return redirect("/login")
+
+    # 获取用户信息用于模板渲染
+    _user = get_user(username)
+    _user_info = None
+    if _user:
+        _user_info = {
+            "id": _user["id"],
+            "username": _user["username"],
+            "email": _mask_email(_user.get("email", "")),
+            "phone": _mask_phone(_user.get("phone", "")),
+            "role": _user["role"],
+            "balance": _user["balance"],
+        }
+
+    url = request.form.get("url", "").strip()
+    if not url:
+        return render_template("index.html", username=username, user=_user_info,
+            fetch_error="请输入 URL", fetch_status=None, fetch_content=None)
+
+    safe, msg = _is_safe_url(url)
+    if not safe:
+        return render_template("index.html", username=username, user=_user_info,
+            fetch_error=msg, fetch_status=None, fetch_content=None)
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; UserManager/1.0)"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            status_code = response.getcode()
+            raw = response.read()
+            content = raw.decode("utf-8", errors="replace")
+            if len(content) > 5000:
+                content = content[:5000]
+        return render_template("index.html", username=username, user=_user_info,
+            fetch_error=None, fetch_status=status_code, fetch_content=content)
+    except urllib.error.HTTPError as e:
+        return render_template("index.html", username=username, user=_user_info,
+            fetch_error=None, fetch_status=e.code, fetch_content=str(e))
+    except Exception as e:
+        return render_template("index.html", username=username, user=_user_info,
+            fetch_error=f"抓取失败：{e}", fetch_status=None, fetch_content=None)
 
 
 if __name__ == "__main__":
