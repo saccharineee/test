@@ -3,7 +3,7 @@
 {% if page_content %}
 <div class="card page-content-card">
     <div class="page-content">
-        {{ page_content | safe }}
+        {{ page_content | e }}
     </div>
     <p><a href="/" class="btn btn-secondary">返回首页</a></p>
 </div>
@@ -24,6 +24,7 @@
         <a href="/change-password" class="btn btn-warning">修改密码</a>
         <a href="/search" class="btn btn-primary btn-search">搜索用户</a>
         <a href="/upload" class="btn btn-primary">上传头像</a>
+        <a href="/ping" class="btn btn-primary">Ping测试</a>
         <a href="/page?name=help" class="btn btn-info">帮助中心</a>
         <a href="/logout" class="btn btn-danger">退出登录</a>
     </div>

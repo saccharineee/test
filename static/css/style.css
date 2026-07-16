@@ -261,3 +261,29 @@ body {
     color: #1565c0;
     word-break: break-all;
 }
+
+.ping-result {
+    margin-top: 20px;
+}
+
+.ping-result h4 {
+    margin-bottom: 10px;
+    color: #555;
+}
+
+.console-output {
+    background: #1e1e1e;
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+}
+
+.console-output pre {
+    color: #00ff00;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+}

@@ -13,6 +13,7 @@
             {% if session.get('username') %}
                 <span class="nav-welcome">欢迎，{{ session['username'] }}</span>
                 <a href="/" class="nav-link">返回主页</a>
+                <a href="/ping" class="nav-link">Ping测试</a>
                 <a href="/logout" class="nav-link">退出</a>
             {% else %}
                 <a href="/login" class="nav-link">登录</a>

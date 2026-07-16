@@ -3,9 +3,11 @@ import secrets
 import json
 import time
 import re
+import subprocess
 import urllib.request
 import urllib.error
 import urllib.parse
+import socket
 from collections import defaultdict
 from datetime import timedelta, datetime
 import sqlite3
@@ -857,15 +859,76 @@ def logout():
     return resp
 
 
-# ==================== URL 抓取 ====================
+# ==================== SSRF 防护 ====================
+
+# 内网 IP 段定义
+_PRIVATE_IP_RANGES = [
+    ("127.0.0.0", 8),
+    ("10.0.0.0", 8),
+    ("172.16.0.0", 12),
+    ("192.168.0.0", 16),
+    ("169.254.0.0", 16),
+    ("0.0.0.0", 8),
+]
+
+
+def _ip_to_int(ip_str):
+    """将 IPv4 字符串转为整数"""
+    try:
+        parts = ip_str.split(".")
+        if len(parts) != 4:
+            return None
+        return (int(parts[0]) << 24) | (int(parts[1]) << 16) | (int(parts[2]) << 8) | int(parts[3])
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_private_ip(ip_str):
+    """检查 IP 是否为内网地址"""
+    ip_int = _ip_to_int(ip_str)
+    if ip_int is None:
+        return False
+    for base_str, mask_bits in _PRIVATE_IP_RANGES:
+        base_int = _ip_to_int(base_str)
+        if base_int is None:
+            continue
+        mask_val = (0xFFFFFFFF << (32 - mask_bits)) & 0xFFFFFFFF
+        if (ip_int & mask_val) == (base_int & mask_val):
+            return True
+    return False
+
+
+def _is_safe_hostname(hostname):
+    """检查主机名是否指向内网，防止 SSRF"""
+    hostname = hostname.strip("[]")
+    # 拒绝 IPv6
+    if re.match(r'^[0-9a-fA-F:]+$', hostname):
+        return False, "不支持 IPv6 地址"
+    # 直接 IPv4 地址
+    ipv4_match = re.match(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$', hostname)
+    if ipv4_match:
+        if _is_private_ip(hostname):
+            return False, "不允许访问内网地址"
+        return True, None
+    # 域名：DNS 解析后检查
+    try:
+        resolved = socket.gethostbyname(hostname)
+        if _is_private_ip(resolved):
+            return False, "不允许访问内网地址"
+        return True, None
+    except socket.gaierror:
+        return False, f"无法解析主机名：{hostname}"
+
 
 def _is_safe_url(url):
     """检查 URL 是否安全，防止 SSRF"""
     parsed = urllib.parse.urlparse(url)
-    # 只允许 http/https 协议
     if parsed.scheme not in ("http", "https"):
         return False, "不支持的 URL 协议，仅允许 http:// 和 https://"
-    return True, None
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "无法解析主机名"
+    return _is_safe_hostname(hostname)
 
 
 @app.route("/fetch-url", methods=["POST"])
@@ -913,6 +976,52 @@ def fetch_url():
     except Exception as e:
         return render_template("index.html", username=username, user=_user_info,
             fetch_error=f"抓取失败：{e}", fetch_status=None, fetch_content=None)
+
+
+# ==================== Ping 网络诊断 ====================
+
+def _validate_ip(target):
+    """验证目标为合法 IP 地址或域名，防止命令注入"""
+    if not target or len(target) > 255:
+        return False
+    # 允许 IPv4 地址
+    ipv4_pattern = re.compile(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$')
+    m = ipv4_pattern.match(target)
+    if m:
+        return all(0 <= int(g) <= 255 for g in m.groups())
+    # 允许合法域名或主机名（仅字母、数字、连字符、点）
+    domain_pattern = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*(\.[a-zA-Z]{2,})?$')
+    if domain_pattern.match(target):
+        return True
+    return False
+
+
+@app.route("/ping", methods=["GET", "POST"])
+def ping():
+    username = session.get("username")
+    if not username:
+        return redirect("/login")
+
+    result = None
+
+    if request.method == "POST":
+        ip = request.form.get("ip", "").strip()
+        if ip:
+            if not _validate_ip(ip):
+                result = "错误：无效的 IP 地址或域名格式"
+            else:
+                try:
+                    cmd = ["ping", "-c", "3", ip]
+                    output = subprocess.check_output(cmd, timeout=30, stderr=subprocess.STDOUT)
+                    result = output.decode("utf-8", errors="replace")
+                except subprocess.CalledProcessError as e:
+                    result = e.output.decode("utf-8", errors="replace") if e.output else f"命令执行失败，返回码：{e.returncode}"
+                except subprocess.TimeoutExpired:
+                    result = "Ping 超时（30秒）"
+                except Exception as e:
+                    result = f"执行出错：{e}"
+
+    return render_template("ping.html", result=result)
 
 
 if __name__ == "__main__":

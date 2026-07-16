@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+    <h2>Ping 网络诊断</h2>
+    <form action="/ping" method="post">
+        <div class="form-group">
+            <input type="text" name="ip" placeholder="请输入 IP 地址或域名" class="form-input" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Ping</button>
+    </form>
+    {% if result %}
+    <div class="ping-result">
+        <h4>执行结果</h4>
+        <div class="console-output"><pre>{{ result }}</pre></div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
