@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>URL 抓取</h2>
+<p class="help-text">抓取指定 URL 的内容（仅支持 http:// 和 https://）</p>
+
+<form method="POST" action="/fetch-url">
+    <div class="form-group">
+        <input type="text" name="url" placeholder="请输入 URL，例如 https://example.com" class="form-input" required>
+    </div>
+    <button type="submit" class="btn">抓取</button>
+</form>
+
+{% if error %}
+<div class="result-box error-box">
+    <h3>错误</h3>
+    <pre class="error-content">{{ error }}</pre>
+</div>
+{% endif %}
+
+{% if status is not none %}
+<div class="result-box">
+    <h3>抓取结果</h3>
+    <p><strong>状态码：</strong><span class="status-code">{{ status }}</span></p>
+    <div class="fetch-content-box">
+        <pre>{{ content }}</pre>
+    </div>
+</div>
+{% endif %}
+
+<style>
+.help-text {
+    color: #666;
+    margin-bottom: 15px;
+}
+.form-group {
+    margin-bottom: 10px;
+}
+.form-input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+.btn {
+    padding: 8px 24px;
+    background: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.btn:hover {
+    background: #45a049;
+}
+.result-box {
+    margin-top: 20px;
+    padding: 10px;
+    border-radius: 4px;
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+}
+.error-box {
+    background: #fff3f3;
+    border-color: #ffcccc;
+}
+.error-content {
+    color: #cc0000;
+}
+.fetch-content-box {
+    background: #1e1e1e;
+    color: #00ff00;
+    padding: 15px;
+    border-radius: 4px;
+    max-height: 500px;
+    overflow: auto;
+}
+.fetch-content-box pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.status-code {
+    font-weight: bold;
+    color: #4CAF50;
+}
+</style>
+{% endblock %}

@@ -931,51 +931,43 @@ def _is_safe_url(url):
     return _is_safe_hostname(hostname)
 
 
-@app.route("/fetch-url", methods=["POST"])
+@app.route("/fetch-url", methods=["GET", "POST"])
 def fetch_url():
     username = session.get("username")
     if not username:
         return redirect("/login")
 
-    # 获取用户信息用于模板渲染
-    _user = get_user(username)
-    _user_info = None
-    if _user:
-        _user_info = {
-            "id": _user["id"],
-            "username": _user["username"],
-            "email": _mask_email(_user.get("email", "")),
-            "phone": _mask_phone(_user.get("phone", "")),
-            "role": _user["role"],
-            "balance": _user["balance"],
-        }
+    result_error = None
+    result_status = None
+    result_content = None
 
-    url = request.form.get("url", "").strip()
-    if not url:
-        return render_template("index.html", username=username, user=_user_info,
-            fetch_error="请输入 URL", fetch_status=None, fetch_content=None)
+    if request.method == "POST":
+        url = request.form.get("url", "").strip()
+        if not url:
+            result_error = "请输入 URL"
+        else:
+            safe, msg = _is_safe_url(url)
+            if not safe:
+                result_error = msg
+            else:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; UserManager/1.0)"})
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        result_status = response.getcode()
+                        raw = response.read()
+                        result_content = raw.decode("utf-8", errors="replace")
+                        if len(result_content) > 5000:
+                            result_content = result_content[:5000]
+                except urllib.error.HTTPError as e:
+                    result_status = e.code
+                    result_content = str(e)
+                except Exception as e:
+                    result_error = f"抓取失败：{e}"
 
-    safe, msg = _is_safe_url(url)
-    if not safe:
-        return render_template("index.html", username=username, user=_user_info,
-            fetch_error=msg, fetch_status=None, fetch_content=None)
-
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; UserManager/1.0)"})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            status_code = response.getcode()
-            raw = response.read()
-            content = raw.decode("utf-8", errors="replace")
-            if len(content) > 5000:
-                content = content[:5000]
-        return render_template("index.html", username=username, user=_user_info,
-            fetch_error=None, fetch_status=status_code, fetch_content=content)
-    except urllib.error.HTTPError as e:
-        return render_template("index.html", username=username, user=_user_info,
-            fetch_error=None, fetch_status=e.code, fetch_content=str(e))
-    except Exception as e:
-        return render_template("index.html", username=username, user=_user_info,
-            fetch_error=f"抓取失败：{e}", fetch_status=None, fetch_content=None)
+    return render_template("fetch.html",
+        error=result_error,
+        status=result_status,
+        content=result_content)
 
 
 # ==================== Ping 网络诊断 ====================
@@ -1022,6 +1014,118 @@ def ping():
                     result = f"执行出错：{e}"
 
     return render_template("ping.html", result=result)
+
+
+# ==================== XML 导入（XXE 模拟 - 安全限制版） ====================
+
+# 允许 XML 实体引用的白名单文件路径（防止 XXE 读取任意文件）
+# 只允许读取特定的、无害的系统文件
+_XML_ENTITY_ALLOWED_FILES = {
+    "/etc/passwd",
+    "/etc/hostname",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/etc/timezone",
+    "/etc/os-release",
+}
+
+# XML 输入最大字节数
+_XML_MAX_INPUT_SIZE = 10 * 1024  # 10KB
+
+# 读取文件内容最大字节数
+_XML_FILE_MAX_SIZE = 5 * 1024  # 5KB
+
+
+@app.route("/xml-import", methods=["GET", "POST"])
+def xml_import():
+    username = session.get("username")
+    if not username:
+        return redirect("/login")
+
+    result = None
+    error = None
+
+    if request.method == "POST":
+        xml_data = request.form.get("xml_data", "").strip()
+
+        if not xml_data:
+            error = "请输入 XML 数据"
+        elif len(xml_data) > _XML_MAX_INPUT_SIZE:
+            error = f"XML 数据过长，最大允许 {_XML_MAX_INPUT_SIZE // 1024}KB"
+        else:
+            # 拒绝危险的内容：禁止参数实体、外部条件实体等
+            if re.search(r'<!ENTITY\s+%', xml_data, re.IGNORECASE):
+                error = "不支持参数实体（%）引用"
+            elif "<!DOCTYPE" in xml_data.upper() and "SYSTEM" not in xml_data.upper():
+                # DOCTYPE 不带 SYSTEM 也行，但如果有 ENTITY 定义必须带 SYSTEM
+                pass
+
+            if not error:
+                try:
+                    # 检测 XML 实体定义（XXE）并提取 SYSTEM 文件路径
+                    entity_pattern = re.compile(r'<!ENTITY\s+(\w+)\s+SYSTEM\s+["\']([^"\']+)["\']\s*>', re.IGNORECASE)
+                    entity_matches = entity_pattern.findall(xml_data)
+
+                    # 为每个实体名称映射文件内容
+                    entity_contents = {}
+                    for ent_name, file_path in entity_matches:
+                        # 路径安全校验：仅允许白名单中的文件，拒绝目录遍历
+                        abs_path = os.path.abspath(os.path.normpath(file_path))
+                        if abs_path not in _XML_ENTITY_ALLOWED_FILES:
+                            entity_contents[ent_name] = f"[拒绝访问：{file_path} 不在允许的文件白名单中]"
+                            continue
+
+                        try:
+                            # 检查文件大小
+                            st = os.stat(abs_path)
+                            if st.st_size > _XML_FILE_MAX_SIZE:
+                                entity_contents[ent_name] = f"[文件过大：{file_path}（超过 {_XML_FILE_MAX_SIZE // 1024}KB）]"
+                                continue
+                        except OSError:
+                            entity_contents[ent_name] = f"[文件不存在或无法访问：{file_path}]"
+                            continue
+
+                        try:
+                            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                                file_content = f.read()
+                            if len(file_content) > _XML_FILE_MAX_SIZE:
+                                file_content = file_content[:_XML_FILE_MAX_SIZE]
+                            entity_contents[ent_name] = file_content
+                        except Exception:
+                            entity_contents[ent_name] = f"[读取失败]"
+
+                    # 替换实体引用 &xxe; 为文件内容
+                    processed_xml = xml_data
+                    for ent_name, content in entity_contents.items():
+                        processed_xml = processed_xml.replace(f"&{ent_name};", content)
+
+                    # 清理残留的 DOCTYPE 定义，避免干扰正则解析
+                    processed_xml = re.sub(r'<!DOCTYPE\s+\w+\s*\[.*?\]\s*>', '', processed_xml, flags=re.DOTALL)
+                    # 清理 XML 声明
+                    processed_xml = re.sub(r'<\?xml\s+.*?\?>', '', processed_xml, flags=re.DOTALL)
+
+                    # 手动解析替换后的 XML，提取 user 节点的 name 和 email
+                    users = []
+                    user_pattern = re.compile(
+                        r'<user>.*?<name>\s*(.*?)\s*</name>.*?<email>\s*(.*?)\s*</email>.*?</user>',
+                        re.DOTALL
+                    )
+                    for m in user_pattern.finditer(processed_xml):
+                        users.append({"name": m.group(1).strip(), "email": m.group(2).strip()})
+
+                    if users:
+                        result = {"users": users, "count": len(users)}
+                    else:
+                        error = "未找到有效的 user 节点（需包含 name 和 email）"
+
+                    # 格式化为 JSON 字符串
+                    if result:
+                        result = json.dumps(result, indent=2, ensure_ascii=False)
+
+                except Exception as e:
+                    error = f"解析失败：请检查 XML 格式是否正确"
+
+    return render_template("xml_import.html", result=result, error=error)
 
 
 if __name__ == "__main__":

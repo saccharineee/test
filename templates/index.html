@@ -24,34 +24,9 @@
         <a href="/change-password" class="btn btn-warning">修改密码</a>
         <a href="/search" class="btn btn-primary btn-search">搜索用户</a>
         <a href="/upload" class="btn btn-primary">上传头像</a>
-        <a href="/ping" class="btn btn-primary">Ping测试</a>
         <a href="/page?name=help" class="btn btn-info">帮助中心</a>
         <a href="/logout" class="btn btn-danger">退出登录</a>
     </div>
-</div>
-
-<div class="card fetch-card">
-    <h3>URL 抓取</h3>
-    <form action="/fetch-url" method="post">
-        <div class="form-group">
-            <input type="text" name="url" placeholder="请输入 URL（仅支持 http:// 和 https://）" class="form-input" required>
-        </div>
-        <button type="submit" class="btn btn-primary">抓取</button>
-    </form>
-    {% if fetch_error %}
-    <div class="fetch-result error">
-        <p>{{ fetch_error }}</p>
-    </div>
-    {% endif %}
-    {% if fetch_status is not none %}
-    <div class="fetch-result">
-        <h4>抓取结果</h4>
-        <p><strong>状态码：</strong><span class="status-code">{{ fetch_status }}</span></p>
-        <div class="fetch-content-box">
-            <pre>{{ fetch_content }}</pre>
-        </div>
-    </div>
-    {% endif %}
 </div>
 {% else %}
 <div class="card">
